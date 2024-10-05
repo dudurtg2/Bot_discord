@@ -4,9 +4,14 @@ from discord.ext import commands
 import yt_dlp as youtube_dl
 import os
 from dotenv import load_dotenv
+from asyncio import Queue
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+import re
 
 load_dotenv()
 
+sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=os.getenv('SPOTIPY_CLIENT_ID'), client_secret=os.getenv('SPOTIPY_CLIENT_SECRET')))
 TOKEN = os.getenv('DISCORD_TOKEN')
 
 intents = discord.Intents.default()
@@ -54,39 +59,30 @@ class YTDLSource(discord.PCMVolumeTransformer):
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
-# Fila de músicas
+
+def get_spotify_track(query):
+    result = sp.track(query)
+    track_name = result['name']
+    artist_name = result['artists'][0]['name']
+    search_query = f"{track_name} {artist_name}"
+    return search_query
+
 song_queue = Queue()
 
 async def play_next(ctx):
     """Função para tocar a próxima música na fila."""
     if not song_queue.empty():
-        next_song = await song_queue.get()  # Pega a próxima música da fila
+        next_song = await song_queue.get()  
         ctx.guild.voice_client.play(next_song['player'], after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop))
         await ctx.send(f"Tocando agora: {next_song['title']}")
-
-@bot.command(name='join')
-async def join(ctx):
-    """Comando para o bot entrar no canal de voz."""
-    if not ctx.message.author.voice:
-        await ctx.send("Você não está em um canal de voz!")
-        return
     else:
-        channel = ctx.message.author.voice.channel
+        await ctx.guild.voice_client.disconnect()
+        await ctx.send("Fila vazia, saindo do canal de voz.")
 
-    await channel.connect()
-    await ctx.send(f"Entrei no canal de voz: {channel}")
-
-@bot.command(name='leave')
-async def leave(ctx):
-    """Comando para o bot sair do canal de voz."""
-    voice_client = ctx.guild.voice_client
-    if voice_client.is_connected():
-        await voice_client.disconnect()
-        await ctx.send("Saí do canal de voz.")
 
 @bot.command(name='play')
 async def play(ctx, url):
-    """Comando para tocar música de um link do YouTube."""
+    """Comando para tocar música de um link do YouTube ou Spotify."""
     if not ctx.message.author.voice:
         await ctx.send("Você não está em um canal de voz! Use o comando !join primeiro.")
         return
@@ -100,8 +96,11 @@ async def play(ctx, url):
 
     async with ctx.typing():
         try:
-            player = await YTDLSource.from_url(url, loop=bot.loop, stream=True)
-            # Adiciona música à fila
+            if "spotify" in url:
+                spotify_title = get_spotify_track(url)
+                player = await YTDLSource.from_url(spotify_title, loop=bot.loop, stream=True)
+            else:
+                player = await YTDLSource.from_url(url, loop=bot.loop, stream=True)
             song_queue.put_nowait({'player': player, 'title': player.title})
 
             if not voice_client.is_playing():
@@ -112,13 +111,50 @@ async def play(ctx, url):
         except Exception as e:
             await ctx.send(f"Ocorreu um erro ao tentar tocar a música: {str(e)}")
 
+
+@bot.command(name='queue')
+async def queue(ctx):
+    """Mostra a fila de músicas."""
+    if song_queue.empty():
+        await ctx.send("A fila está vazia.")
+    else:
+        queue_list = []
+        for i, song in enumerate(song_queue._queue, 1):
+            queue_list.append(f"{i}. {song['title']}")
+        queue_text = "\n".join(queue_list)
+        await ctx.send(f"Fila de músicas:\n{queue_text}")
+
+
+@bot.command(name='join')
+async def join(ctx):
+    """Comando para o bot entrar no canal de voz."""
+    if not ctx.message.author.voice:
+        await ctx.send("Você não está em um canal de voz!")
+        return
+    else:
+        channel = ctx.message.author.voice.channel
+
+    await channel.connect()
+    await ctx.send(f"Entrei no canal de voz: {channel}")
+
+
+@bot.command(name='leave')
+async def leave(ctx):
+    """Comando para o bot sair do canal de voz."""
+    voice_client = ctx.guild.voice_client
+    if voice_client.is_connected():
+        await voice_client.disconnect()
+        await ctx.send("Saí do canal de voz.")
+
+
 @bot.command(name='skip')
 async def skip(ctx):
     """Comando para pular para a próxima música."""
     voice_client = ctx.guild.voice_client
     if voice_client.is_playing():
-        voice_client.stop()  # Para a música atual e chama o after para tocar a próxima
+        voice_client.stop()
         await ctx.send("Pulei para a próxima música.")
+
 
 @bot.command(name='pause')
 async def pause(ctx):
@@ -128,6 +164,7 @@ async def pause(ctx):
         voice_client.pause()
         await ctx.send("Música pausada.")
 
+
 @bot.command(name='resume')
 async def resume(ctx):
     """Comando para retomar a música."""
@@ -136,6 +173,7 @@ async def resume(ctx):
         voice_client.resume()
         await ctx.send("Música retomada.")
 
+
 @bot.command(name='stop')
 async def stop(ctx):
     """Comando para parar a música."""
@@ -143,5 +181,6 @@ async def stop(ctx):
     if voice_client.is_playing():
         voice_client.stop()
         await ctx.send("Música parada.")
+
 
 bot.run(TOKEN)
